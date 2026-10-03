@@ -54,16 +54,117 @@ int read_line(int client_fd, char *buffer, size_t buffer_size)
     return (int)position;
 }
 
+/*
+ * Read current system information from Linux /proc files.
+ *
+ * CPU load:
+ *     /proc/loadavg
+ *
+ * Memory:
+ *     /proc/meminfo
+ *
+ * Uptime:
+ *     /proc/uptime
+ */
+void get_system_info(double *cpu_load,
+                     long *mem_used_mb,
+                     long *uptime_sec)
+{
+    FILE *file;
+
+    double uptime;
+
+    long mem_total_kb;
+    long mem_available_kb;
+
+    /* --------------------------------
+     * Read CPU load
+     * -------------------------------- */
+    file = fopen("/proc/loadavg", "r");
+
+    if (file != NULL)
+    {
+        fscanf(file, "%lf", cpu_load);
+
+        fclose(file);
+    }
+    else
+    {
+        *cpu_load = 0.0;
+    }
+
+    /* --------------------------------
+     * Read memory information
+     * -------------------------------- */
+    mem_total_kb = 0;
+    mem_available_kb = 0;
+
+    file = fopen("/proc/meminfo", "r");
+
+    if (file != NULL)
+    {
+        char line[256];
+
+        while (fgets(line, sizeof(line), file) != NULL)
+        {
+            if (sscanf(line,
+                       "MemTotal: %ld kB",
+                       &mem_total_kb) == 1)
+            {
+                continue;
+            }
+
+            if (sscanf(line,
+                       "MemAvailable: %ld kB",
+                       &mem_available_kb) == 1)
+            {
+                continue;
+            }
+        }
+
+        fclose(file);
+    }
+
+    /*
+     * Convert used memory from KB to MB.
+     */
+    *mem_used_mb =
+        (mem_total_kb - mem_available_kb) / 1024;
+
+    /* --------------------------------
+     * Read system uptime
+     * -------------------------------- */
+    file = fopen("/proc/uptime", "r");
+
+    if (file != NULL)
+    {
+        fscanf(file, "%lf", &uptime);
+
+        fclose(file);
+
+        *uptime_sec = (long)uptime;
+    }
+    else
+    {
+        *uptime_sec = 0;
+    }
+}
+
 int main(void)
 {
     int server_fd;
     int reuse = 1;
+
     struct sockaddr_in server_addr;
 
     printf("RemoteOps Agent starting...\n");
 
-    /* Create TCP socket */
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    /* --------------------------------
+     * Create TCP socket
+     * -------------------------------- */
+    server_fd = socket(AF_INET,
+                       SOCK_STREAM,
+                       0);
 
     if (server_fd < 0)
     {
@@ -73,7 +174,9 @@ int main(void)
 
     printf("TCP socket created successfully.\n");
 
-    /* Allow reuse of the server port */
+    /* --------------------------------
+     * Allow quick port reuse
+     * -------------------------------- */
     if (setsockopt(server_fd,
                    SOL_SOCKET,
                    SO_REUSEADDR,
@@ -85,14 +188,24 @@ int main(void)
         return 1;
     }
 
-    /* Configure server address */
-    memset(&server_addr, 0, sizeof(server_addr));
+    /* --------------------------------
+     * Configure server address
+     * -------------------------------- */
+    memset(&server_addr,
+           0,
+           sizeof(server_addr));
 
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
-    server_addr.sin_port = htons(PORT);
 
-    /* Bind socket to port 9410 */
+    server_addr.sin_addr.s_addr =
+        INADDR_ANY;
+
+    server_addr.sin_port =
+        htons(PORT);
+
+    /* --------------------------------
+     * Bind socket to port 9410
+     * -------------------------------- */
     if (bind(server_fd,
              (struct sockaddr *)&server_addr,
              sizeof(server_addr)) < 0)
@@ -102,9 +215,12 @@ int main(void)
         return 1;
     }
 
-    printf("Socket bound to port %d.\n", PORT);
+    printf("Socket bound to port %d.\n",
+           PORT);
 
-    /* Put socket into listening mode */
+    /* --------------------------------
+     * Start listening
+     * -------------------------------- */
     if (listen(server_fd, 5) < 0)
     {
         perror("listen");
@@ -112,19 +228,26 @@ int main(void)
         return 1;
     }
 
-    printf("RemoteOps Agent is listening on port %d...\n", PORT);
+    printf("RemoteOps Agent is listening on port %d...\n",
+           PORT);
 
-    /* Wait for Controllers */
+    /* --------------------------------
+     * Accept Controllers
+     * -------------------------------- */
     while (1)
     {
         int client_fd;
+
         struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
+
+        socklen_t client_len =
+            sizeof(client_addr);
 
         /* Accept a Controller connection */
-        client_fd = accept(server_fd,
-                           (struct sockaddr *)&client_addr,
-                           &client_len);
+        client_fd =
+            accept(server_fd,
+                   (struct sockaddr *)&client_addr,
+                   &client_len);
 
         if (client_fd < 0)
         {
@@ -136,19 +259,24 @@ int main(void)
                inet_ntoa(client_addr.sin_addr),
                ntohs(client_addr.sin_port));
 
-        /* Authentication state for this connection */
+        /* Authentication state */
         int authenticated = 0;
 
         /* Buffer for TCP lines */
         char buffer[BUFFER_SIZE];
 
-        /* Keep communicating with this Controller */
+        /* --------------------------------
+         * Communicate with this Controller
+         * -------------------------------- */
         while (1)
         {
+            int line_length;
+
             /* Read one complete line */
-            int line_length = read_line(client_fd,
-                                        buffer,
-                                        sizeof(buffer));
+            line_length =
+                read_line(client_fd,
+                          buffer,
+                          sizeof(buffer));
 
             if (line_length < 0)
             {
@@ -162,15 +290,21 @@ int main(void)
                 break;
             }
 
-            printf("Received line: %s", buffer);
+            printf("Received line: %s",
+                   buffer);
 
-            /*
-             * AUTH must be the first command.
-             */
+            /* --------------------------------
+             * Authentication
+             * -------------------------------- */
             if (!authenticated)
             {
-                /* Check that the command starts with AUTH */
-                if (strncmp(buffer, "AUTH ", 5) != 0)
+                /*
+                 * AUTH must be the first
+                 * successful command.
+                 */
+                if (strncmp(buffer,
+                            "AUTH ",
+                            5) != 0)
                 {
                     const char *response =
                         "ERR 001 AUTH_FAILED SID:6053\n";
@@ -182,17 +316,15 @@ int main(void)
 
                     printf("Authentication required.\n");
 
-                    /*
-                     * The connection remains open so the
-                     * Controller can try AUTH.
-                     */
                     continue;
                 }
 
-                /* Extract token after "AUTH " */
+                /* Extract authentication token */
                 char token[BUFFER_SIZE];
 
-                if (sscanf(buffer, "AUTH %1023s", token) != 1)
+                if (sscanf(buffer,
+                           "AUTH %1023s",
+                           token) != 1)
                 {
                     const char *response =
                         "ERR 001 AUTH_FAILED SID:6053\n";
@@ -203,16 +335,22 @@ int main(void)
                          0);
 
                     printf("Authentication failed.\n");
+
                     continue;
                 }
 
-                /* Compare supplied token with personalised token */
-                if (strcmp(token, AUTH_TOKEN) == 0)
+                /* Compare token */
+                if (strcmp(token,
+                           AUTH_TOKEN) == 0)
                 {
                     authenticated = 1;
 
-                    const char *response =
-                        "OK AUTHENTICATED SID:6053\n";
+                    char response[BUFFER_SIZE];
+
+                    snprintf(response,
+                             sizeof(response),
+                             "OK AUTHENTICATED SID:%s\n",
+                             SID);
 
                     send(client_fd,
                          response,
@@ -237,17 +375,63 @@ int main(void)
                 continue;
             }
 
-            /*
-             * At this point authentication has succeeded.
-             *
-             * Other RemoteOps commands will be added here
-             * in the next stages.
-             */
-
-            if (strcmp(buffer, "QUIT\n") == 0)
+            /* --------------------------------
+             * SYSINFO
+             * -------------------------------- */
+            if (strcmp(buffer,
+                       "SYSINFO\n") == 0)
             {
-                const char *response =
-                    "OK BYE SID:6053\n";
+                double cpu_load;
+
+                long mem_used_mb;
+                long uptime_sec;
+
+                char response[BUFFER_SIZE];
+
+                /* Read current system information */
+                get_system_info(&cpu_load,
+                                &mem_used_mb,
+                                &uptime_sec);
+
+                /*
+                 * Build the required protocol
+                 * response.
+                 */
+                snprintf(response,
+                         sizeof(response),
+                         "OK SYSINFO %.2f %ld %ld SID:%s\n",
+                         cpu_load,
+                         mem_used_mb,
+                         uptime_sec,
+                         SID);
+
+                /* Send response */
+                if (send(client_fd,
+                         response,
+                         strlen(response),
+                         0) < 0)
+                {
+                    perror("send");
+                    break;
+                }
+
+                printf("SYSINFO response sent.\n");
+
+                continue;
+            }
+
+            /* --------------------------------
+             * QUIT
+             * -------------------------------- */
+            if (strcmp(buffer,
+                       "QUIT\n") == 0)
+            {
+                char response[BUFFER_SIZE];
+
+                snprintf(response,
+                         sizeof(response),
+                         "OK BYE SID:%s\n",
+                         SID);
 
                 send(client_fd,
                      response,
@@ -255,23 +439,32 @@ int main(void)
                      0);
 
                 printf("Controller requested disconnect.\n");
+
                 break;
             }
 
-            /* Temporary response for authenticated commands */
-            const char *response =
-                "OK SID:6053\n";
-
-            if (send(client_fd,
-                     response,
-                     strlen(response),
-                     0) < 0)
+            /* --------------------------------
+             * Temporary response
+             * -------------------------------- */
             {
-                perror("send");
-                break;
-            }
+                char response[BUFFER_SIZE];
 
-            printf("Response sent successfully.\n");
+                snprintf(response,
+                         sizeof(response),
+                         "OK SID:%s\n",
+                         SID);
+
+                if (send(client_fd,
+                         response,
+                         strlen(response),
+                         0) < 0)
+                {
+                    perror("send");
+                    break;
+                }
+
+                printf("Response sent successfully.\n");
+            }
         }
 
         /* Close Controller connection */
