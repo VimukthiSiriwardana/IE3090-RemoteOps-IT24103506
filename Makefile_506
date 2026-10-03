@@ -1,0 +1,15 @@
+CC = gcc
+CFLAGS = -Wall -Wextra -std=c11
+
+AGENT = agent
+AGENT_SRC = agent_506.c
+
+all: $(AGENT)
+
+$(AGENT): $(AGENT_SRC)
+	$(CC) $(CFLAGS) $(AGENT_SRC) -o $(AGENT)
+
+clean:
+	rm -f $(AGENT)
+
+.PHONY: all clean

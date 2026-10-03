@@ -1,0 +1,4 @@
+agent
+*.o
+*.log
+agentfiles/
