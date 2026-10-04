@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #define PORT 9410
 #define BUFFER_SIZE 1024
