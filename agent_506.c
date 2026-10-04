@@ -26,6 +26,17 @@
 
 #define MAX_FILE_SIZE (10ULL * 1024ULL * 1024ULL)
 
+/* Protect concurrent writes to the shared log file. */
+pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Information passed to a Controller connection thread.
+ */
+typedef struct
+{
+    int client_socket;
+} client_context_t;
+
 
 /*
  * Read one complete line from the TCP socket.
@@ -681,7 +692,11 @@ void handle_exec(
  */
 void write_log(const char *message)
 {
-    FILE *log_file =
+    FILE *log_file;
+
+    pthread_mutex_lock(&log_mutex);
+
+    log_file =
         fopen(
             LOG_FILE,
             "a"
@@ -689,6 +704,7 @@ void write_log(const char *message)
 
     if (log_file == NULL)
     {
+        pthread_mutex_unlock(&log_mutex);
         return;
     }
 
@@ -701,11 +717,14 @@ void write_log(const char *message)
 
 
     fclose(log_file);
+
+    pthread_mutex_unlock(&log_mutex);
 }
 
 
 /*
  * Validate a filename.
+
  *
  * Reject:
  *   /
@@ -1293,15 +1312,417 @@ void process_get_command(
 
 
 /*
+ * Handle one Controller connection.
+ *
+ * A separate detached thread is created for every accepted
+ * Controller socket. This allows multiple Controllers to use
+ * the Agent at the same time.
+ */
+void *client_thread(void *argument)
+{
+    client_context_t *context =
+        (client_context_t *)argument;
+
+    int client_socket =
+        context->client_socket;
+
+    free(context);
+
+
+    printf(
+        "Controller connected.\n"
+    );
+
+
+    write_log(
+        "Controller connected"
+    );
+
+
+    /*
+     * Each connection starts unauthenticated.
+     */
+    int authenticated = 0;
+
+
+    while (1)
+    {
+        char command[BUFFER_SIZE];
+
+
+        int result =
+            read_line(
+                client_socket,
+                command,
+                sizeof(command)
+            );
+
+
+        /*
+         * Client disconnected.
+         */
+        if (result == 0)
+        {
+            printf(
+                "Controller disconnected.\n"
+            );
+
+
+            write_log(
+                "Controller disconnected"
+            );
+
+
+            break;
+        }
+
+
+        /*
+         * recv() error.
+         */
+        if (result < 0)
+        {
+            perror("recv");
+
+
+            write_log(
+                "Controller connection error"
+            );
+
+
+            break;
+        }
+
+
+        /*
+         * Remove CR/LF.
+         */
+        command[
+            strcspn(
+                command,
+                "\r\n"
+            )
+        ] = '\0';
+
+
+        printf(
+            "Received: %s\n",
+            command
+        );
+
+
+        /*
+         * AUTH
+         */
+        if (strncmp(
+                command,
+                "AUTH ",
+                5
+            ) == 0)
+        {
+            const char *token =
+                command + 5;
+
+
+            if (strcmp(
+                    token,
+                    AUTH_TOKEN
+                ) == 0)
+            {
+                authenticated = 1;
+
+
+                char response[BUFFER_SIZE];
+
+
+                snprintf(
+                    response,
+                    sizeof(response),
+                    "OK AUTHENTICATED SID:%s\n",
+                    SID
+                );
+
+
+                send_all(
+                    client_socket,
+                    response,
+                    strlen(response)
+                );
+
+
+                write_log(
+                    "AUTH successful"
+                );
+            }
+            else
+            {
+                authenticated = 0;
+
+
+                char response[BUFFER_SIZE];
+
+
+                snprintf(
+                    response,
+                    sizeof(response),
+                    "ERR 001 AUTH_FAILED SID:%s\n",
+                    SID
+                );
+
+
+                send_all(
+                    client_socket,
+                    response,
+                    strlen(response)
+                );
+
+
+                write_log(
+                    "AUTH failed"
+                );
+            }
+
+
+            continue;
+        }
+
+
+        /*
+         * Reject commands before successful AUTH.
+         */
+        if (!authenticated)
+        {
+            char response[BUFFER_SIZE];
+
+
+            snprintf(
+                response,
+                sizeof(response),
+                "ERR 003 NOT_AUTHENTICATED SID:%s\n",
+                SID
+            );
+
+
+            send_all(
+                client_socket,
+                response,
+                strlen(response)
+            );
+
+
+            write_log(
+                "Rejected unauthenticated command"
+            );
+
+
+            continue;
+        }
+
+
+        /*
+         * SYSINFO
+         */
+        if (strcmp(
+                command,
+                "SYSINFO"
+            ) == 0)
+        {
+            handle_sysinfo(
+                client_socket
+            );
+
+
+            write_log(
+                "SYSINFO command"
+            );
+
+
+            continue;
+        }
+
+
+        /*
+         * LISTPROC
+         */
+        if (strcmp(
+                command,
+                "LISTPROC"
+            ) == 0)
+        {
+            handle_listproc(
+                client_socket
+            );
+
+
+            write_log(
+                "LISTPROC command"
+            );
+
+
+            continue;
+        }
+
+
+        /*
+         * EXEC
+         */
+        if (strncmp(
+                command,
+                "EXEC ",
+                5
+            ) == 0)
+        {
+            const char *command_name =
+                command + 5;
+
+
+            handle_exec(
+                client_socket,
+                command_name
+            );
+
+
+            write_log(
+                "EXEC command"
+            );
+
+
+            continue;
+        }
+
+
+        /*
+         * PUT
+         */
+        if (strncmp(
+                command,
+                "PUT ",
+                4
+            ) == 0)
+        {
+            process_put_command(
+                client_socket,
+                command
+            );
+
+
+            write_log(
+                "PUT command"
+            );
+
+
+            continue;
+        }
+
+
+        /*
+         * GET
+         */
+        if (strncmp(
+                command,
+                "GET ",
+                4
+            ) == 0)
+        {
+            process_get_command(
+                client_socket,
+                command
+            );
+
+
+            write_log(
+                "GET command"
+            );
+
+
+            continue;
+        }
+
+
+        /*
+         * QUIT
+         */
+        if (strcmp(
+                command,
+                "QUIT"
+            ) == 0)
+        {
+            char response[BUFFER_SIZE];
+
+
+            snprintf(
+                response,
+                sizeof(response),
+                "OK BYE SID:%s\n",
+                SID
+            );
+
+
+            send_all(
+                client_socket,
+                response,
+                strlen(response)
+            );
+
+
+            write_log(
+                "QUIT command"
+            );
+
+
+            break;
+        }
+
+
+        /*
+         * Unknown command.
+         */
+        {
+            char response[BUFFER_SIZE];
+
+
+            snprintf(
+                response,
+                sizeof(response),
+                "ERR 006 UNKNOWN_COMMAND SID:%s\n",
+                SID
+            );
+
+
+            send_all(
+                client_socket,
+                response,
+                strlen(response)
+            );
+
+
+            write_log(
+                "Unknown command"
+            );
+        }
+    }
+
+
+    close(
+        client_socket
+    );
+
+
+    return NULL;
+}
+
+
+/*
  * Main Agent.
  */
 int main(void)
 {
     int server_socket;
-    int client_socket;
+
 
     struct sockaddr_in server_address;
     struct sockaddr_in client_address;
+
 
     socklen_t client_length;
 
@@ -1313,6 +1734,7 @@ int main(void)
         "./agentfiles",
         0755
     );
+
 
     mkdir(
         STORAGE_PATH,
@@ -1343,6 +1765,7 @@ int main(void)
      */
     int option = 1;
 
+
     if (setsockopt(
             server_socket,
             SOL_SOCKET,
@@ -1353,7 +1776,9 @@ int main(void)
     {
         perror("setsockopt");
 
+
         close(server_socket);
+
 
         return 1;
     }
@@ -1372,8 +1797,10 @@ int main(void)
     server_address.sin_family =
         AF_INET;
 
+
     server_address.sin_addr.s_addr =
         htonl(INADDR_ANY);
+
 
     server_address.sin_port =
         htons(PORT);
@@ -1390,7 +1817,9 @@ int main(void)
     {
         perror("bind");
 
+
         close(server_socket);
+
 
         return 1;
     }
@@ -1406,7 +1835,9 @@ int main(void)
     {
         perror("listen");
 
+
         close(server_socket);
+
 
         return 1;
     }
@@ -1416,15 +1847,18 @@ int main(void)
         "RemoteOps Agent started.\n"
     );
 
+
     printf(
         "Listening on TCP port %d\n",
         PORT
     );
 
+
     printf(
         "Session ID: %s\n",
         SID
     );
+
 
     printf(
         "Authentication token: %s\n",
@@ -1439,6 +1873,10 @@ int main(void)
 
     /*
      * Main connection loop.
+     *
+     * Each accepted Controller is handed to a separate
+     * detached pthread so that multiple Controllers can
+     * be served concurrently.
      */
     while (1)
     {
@@ -1446,7 +1884,7 @@ int main(void)
             sizeof(client_address);
 
 
-        client_socket =
+        int client_socket =
             accept(
                 server_socket,
                 (struct sockaddr *)&client_address,
@@ -1461,375 +1899,61 @@ int main(void)
         }
 
 
-        printf(
-            "Controller connected.\n"
-        );
-
-
-        write_log(
-            "Controller connected"
-        );
-
-
-        /*
-         * Each connection starts unauthenticated.
-         */
-        int authenticated = 0;
-
-
-        while (1)
-        {
-            char command[BUFFER_SIZE];
-
-
-            int result =
-                read_line(
-                    client_socket,
-                    command,
-                    sizeof(command)
-                );
-
-
-            /*
-             * Client disconnected.
-             */
-            if (result == 0)
-            {
-                printf(
-                    "Controller disconnected.\n"
-                );
-
-                write_log(
-                    "Controller disconnected"
-                );
-
-                break;
-            }
-
-
-            /*
-             * recv() error.
-             */
-            if (result < 0)
-            {
-                perror("recv");
-
-                write_log(
-                    "Controller connection error"
-                );
-
-                break;
-            }
-
-
-            /*
-             * Remove CR/LF.
-             */
-            command[
-                strcspn(
-                    command,
-                    "\r\n"
-                )
-            ] = '\0';
-
-
-            printf(
-                "Received: %s\n",
-                command
+        client_context_t *context =
+            malloc(
+                sizeof(client_context_t)
             );
 
 
-            /*
-             * AUTH
-             */
-            if (strncmp(
-                    command,
-                    "AUTH ",
-                    5
-                ) == 0)
-            {
-                const char *token =
-                    command + 5;
+        if (context == NULL)
+        {
+            perror("malloc");
 
 
-                if (strcmp(
-                        token,
-                        AUTH_TOKEN
-                    ) == 0)
-                {
-                    authenticated = 1;
+            close(client_socket);
 
 
-                    char response[BUFFER_SIZE];
-
-                    snprintf(
-                        response,
-                        sizeof(response),
-                        "OK AUTHENTICATED SID:%s\n",
-                        SID
-                    );
-
-
-                    send_all(
-                        client_socket,
-                        response,
-                        strlen(response)
-                    );
-
-
-                    write_log(
-                        "AUTH successful"
-                    );
-                }
-                else
-                {
-                    authenticated = 0;
-
-
-                    char response[BUFFER_SIZE];
-
-                    snprintf(
-                        response,
-                        sizeof(response),
-                        "ERR 001 AUTH_FAILED SID:%s\n",
-                        SID
-                    );
-
-
-                    send_all(
-                        client_socket,
-                        response,
-                        strlen(response)
-                    );
-
-
-                    write_log(
-                        "AUTH failed"
-                    );
-                }
-
-
-                continue;
-            }
-
-
-            /*
-             * Reject commands before successful AUTH.
-             */
-            if (!authenticated)
-            {
-                char response[BUFFER_SIZE];
-
-                snprintf(
-                    response,
-                    sizeof(response),
-                    "ERR 003 NOT_AUTHENTICATED SID:%s\n",
-                    SID
-                );
-
-
-                send_all(
-                    client_socket,
-                    response,
-                    strlen(response)
-                );
-
-
-                write_log(
-                    "Rejected unauthenticated command"
-                );
-
-
-                continue;
-            }
-
-
-            /*
-             * SYSINFO
-             */
-            if (strcmp(
-                    command,
-                    "SYSINFO"
-                ) == 0)
-            {
-                handle_sysinfo(
-                    client_socket
-                );
-
-
-                write_log(
-                    "SYSINFO command"
-                );
-
-
-                continue;
-            }
-
-
-            /*
-             * LISTPROC
-             */
-            if (strcmp(
-                    command,
-                    "LISTPROC"
-                ) == 0)
-            {
-                handle_listproc(
-                    client_socket
-                );
-
-
-                write_log(
-                    "LISTPROC command"
-                );
-
-
-                continue;
-            }
-
-
-            /*
-             * EXEC
-             */
-            if (strncmp(
-                    command,
-                    "EXEC ",
-                    5
-                ) == 0)
-            {
-                const char *command_name =
-                    command + 5;
-
-
-                handle_exec(
-                    client_socket,
-                    command_name
-                );
-
-
-                write_log(
-                    "EXEC command"
-                );
-
-
-                continue;
-            }
-
-
-            /*
-             * PUT
-             */
-            if (strncmp(
-                    command,
-                    "PUT ",
-                    4
-                ) == 0)
-            {
-                process_put_command(
-                    client_socket,
-                    command
-                );
-
-
-                write_log(
-                    "PUT command"
-                );
-
-
-                continue;
-            }
-
-
-            /*
-             * GET
-             */
-            if (strncmp(
-                    command,
-                    "GET ",
-                    4
-                ) == 0)
-            {
-                process_get_command(
-                    client_socket,
-                    command
-                );
-
-
-                write_log(
-                    "GET command"
-                );
-
-
-                continue;
-            }
-
-
-            /*
-             * QUIT
-             */
-            if (strcmp(
-                    command,
-                    "QUIT"
-                ) == 0)
-            {
-                char response[BUFFER_SIZE];
-
-
-                snprintf(
-                    response,
-                    sizeof(response),
-                    "OK BYE SID:%s\n",
-                    SID
-                );
-
-
-                send_all(
-                    client_socket,
-                    response,
-                    strlen(response)
-                );
-
-
-                write_log(
-                    "QUIT command"
-                );
-
-
-                break;
-            }
-
-
-            /*
-             * Unknown command.
-             */
-            {
-                char response[BUFFER_SIZE];
-
-
-                snprintf(
-                    response,
-                    sizeof(response),
-                    "ERR 006 UNKNOWN_COMMAND SID:%s\n",
-                    SID
-                );
-
-
-                send_all(
-                    client_socket,
-                    response,
-                    strlen(response)
-                );
-
-
-                write_log(
-                    "Unknown command"
-                );
-            }
+            continue;
         }
 
 
-        close(
-            client_socket
+        context->client_socket =
+            client_socket;
+
+
+        pthread_t thread_id;
+
+
+        int thread_result =
+            pthread_create(
+                &thread_id,
+                NULL,
+                client_thread,
+                context
+            );
+
+
+        if (thread_result != 0)
+        {
+            fprintf(
+                stderr,
+                "pthread_create failed: %s\n",
+                strerror(thread_result)
+            );
+
+
+            close(client_socket);
+
+
+            free(context);
+
+
+            continue;
+        }
+
+
+        pthread_detach(
+            thread_id
         );
     }
 
