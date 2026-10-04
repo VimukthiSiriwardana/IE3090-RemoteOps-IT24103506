@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -228,6 +229,147 @@ void handle_sysinfo(int client_socket)
         cpu_load,
         memory_used_mb,
         uptime_sec,
+        SID
+    );
+
+    send_all(
+        client_socket,
+        response,
+        strlen(response)
+    );
+}
+
+
+/*
+ * Handle EXEC.
+ *
+ * Only the five commands specified by the assignment
+ * are allowed:
+ *
+ * DATE
+ * UPTIME
+ * DISKFREE
+ * HOSTNAME
+ * WHOAMI
+ */
+void handle_exec(int client_socket, const char *command_name)
+{
+    const char *system_command = NULL;
+    char response[BUFFER_SIZE];
+    char output[BUFFER_SIZE];
+
+    /*
+     * Check the fixed whitelist.
+     */
+    if (strcmp(command_name, "DATE") == 0)
+    {
+        system_command = "date";
+    }
+    else if (strcmp(command_name, "UPTIME") == 0)
+    {
+        system_command = "uptime";
+    }
+    else if (strcmp(command_name, "DISKFREE") == 0)
+    {
+        system_command = "df -h . | tail -1";
+    }
+    else if (strcmp(command_name, "HOSTNAME") == 0)
+    {
+        system_command = "hostname";
+    }
+    else if (strcmp(command_name, "WHOAMI") == 0)
+    {
+        system_command = "whoami";
+    }
+    else
+    {
+        /*
+         * Anything outside the whitelist is rejected.
+         */
+        snprintf(
+            response,
+            sizeof(response),
+            "ERR 002 COMMAND_NOT_ALLOWED SID:%s\n",
+            SID
+        );
+
+        send_all(
+            client_socket,
+            response,
+            strlen(response)
+        );
+
+        return;
+    }
+
+    /*
+     * Execute only the fixed command selected above.
+     */
+    FILE *process = popen(
+        system_command,
+        "r"
+    );
+
+    if (process == NULL)
+    {
+        snprintf(
+            response,
+            sizeof(response),
+            "ERR 003 EXEC_FAILED SID:%s\n",
+            SID
+        );
+
+        send_all(
+            client_socket,
+            response,
+            strlen(response)
+        );
+
+        return;
+    }
+
+    /*
+     * Read the command output.
+     */
+    if (fgets(
+            output,
+            sizeof(output),
+            process
+        ) == NULL)
+    {
+        pclose(process);
+
+        snprintf(
+            response,
+            sizeof(response),
+            "ERR 003 EXEC_FAILED SID:%s\n",
+            SID
+        );
+
+        send_all(
+            client_socket,
+            response,
+            strlen(response)
+        );
+
+        return;
+    }
+
+    pclose(process);
+
+    /*
+     * Remove the newline produced by the system command.
+     */
+    output[strcspn(output, "\r\n")] = '\0';
+
+    /*
+     * Build the required protocol response.
+     */
+    snprintf(
+        response,
+        sizeof(response),
+        "OK EXEC_RESULT %s SID:%s\n",
+        output,
         SID
     );
 
@@ -864,6 +1006,26 @@ int main(void)
                     "LISTPROC command"
                 );
 
+
+                continue;
+            }
+
+
+            /*
+             * EXEC
+             */
+            if (strncmp(command, "EXEC ", 5) == 0)
+            {
+                const char *command_name = command + 5;
+
+                handle_exec(
+                    client_socket,
+                    command_name
+                );
+
+                write_log(
+                    "EXEC command"
+                );
 
                 continue;
             }
