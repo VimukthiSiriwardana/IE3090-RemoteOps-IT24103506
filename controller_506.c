@@ -1,74 +1,74 @@
+/*
+ * IE3090 Network Programming
+ * RemoteOps Controller
+ *
+ * Registration Number : IT24103506
+ * Controller Source   : controller_506.c
+ * Agent Port          : 9410
+ * Session ID          : SID:6053
+ * Authentication     : OPS-3506
+ *
+ * TCP is used for commands and file transfers.
+ * UDP is used for MONITOR SYSINFO datagrams.
+ *
+ * Optional Extension:
+ * Transfer throughput reporting for PUT and GET.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <netinet/in.h>
 
-#define SERVER_IP "127.0.0.1"
-#define PORT 9410
+#define AGENT_IP "127.0.0.1"
+#define AGENT_PORT 9410
+
 #define AUTH_TOKEN "OPS-3506"
+#define SID "6053"
 
-#define BUFFER_SIZE 4096
-#define RESPONSE_SIZE 65536
+#define BUFFER_SIZE 65536
+#define FILENAME_SIZE 256
+
 
 /*
- * Receive one complete line-based protocol response.
- *
- * TCP is a byte stream, so one response may arrive through
- * multiple recv() calls. Continue receiving until '\n' is found.
+ * ---------------------------------------------------------
+ * Utility: send all bytes
+ * ---------------------------------------------------------
  */
-int receive_line(int sock, char *buffer, size_t buffer_size)
+
+static int send_all(
+    int socket_fd,
+    const void *buffer,
+    size_t length
+)
 {
+    const char *data = (const char *)buffer;
     size_t total = 0;
 
-    while (total < buffer_size - 1)
+    while (total < length)
     {
-        char ch;
-
-        ssize_t received = recv(sock, &ch, 1, 0);
-
-        if (received < 0)
-        {
-            perror("recv");
-            return -1;
-        }
-
-        if (received == 0)
-        {
-            return 0;
-        }
-
-        buffer[total++] = ch;
-
-        if (ch == '\n')
-        {
-            break;
-        }
-    }
-
-    buffer[total] = '\0';
-
-    return (int)total;
-}
-
-/*
- * Send exactly length bytes.
- */
-int send_all(int sock, const void *data, size_t length)
-{
-    size_t total_sent = 0;
-
-    while (total_sent < length)
-    {
-        ssize_t sent = send(sock,
-                            (const char *)data + total_sent,
-                            length - total_sent,
-                            0);
+        ssize_t sent = send(
+            socket_fd,
+            data + total,
+            length - total,
+            0
+        );
 
         if (sent < 0)
         {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
             perror("send");
             return -1;
         }
@@ -78,96 +78,174 @@ int send_all(int sock, const void *data, size_t length)
             return -1;
         }
 
-        total_sent += (size_t)sent;
+        total += (size_t)sent;
     }
 
     return 0;
 }
 
-/*
- * Receive exactly length bytes.
- *
- * This is required for GET because the Agent sends a header
- * followed immediately by exactly filesize raw bytes.
- */
-int receive_exact(int sock, void *data, size_t length)
-{
-    size_t total_received = 0;
 
-    while (total_received < length)
+/*
+ * ---------------------------------------------------------
+ * Utility: receive one complete line
+ * ---------------------------------------------------------
+ *
+ * TCP is a byte stream, so one recv() is NOT assumed to
+ * contain one complete response.
+ */
+
+static int receive_line(
+    int socket_fd,
+    char *buffer,
+    size_t buffer_size
+)
+{
+    size_t position = 0;
+
+    while (position < buffer_size - 1)
     {
-        ssize_t received = recv(sock,
-                                (char *)data + total_received,
-                                length - total_received,
-                                0);
+        char character;
+
+        ssize_t received = recv(
+            socket_fd,
+            &character,
+            1,
+            0
+        );
 
         if (received < 0)
         {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
             perror("recv");
             return -1;
         }
 
         if (received == 0)
         {
-            printf("Connection closed before all file bytes were received.\n");
+            return 0;
+        }
+
+        buffer[position++] = character;
+
+        if (character == '\n')
+        {
+            buffer[position] = '\0';
+            return 1;
+        }
+    }
+
+    buffer[buffer_size - 1] = '\0';
+
+    fprintf(
+        stderr,
+        "Response line is too long.\n"
+    );
+
+    return -1;
+}
+
+
+/*
+ * ---------------------------------------------------------
+ * Utility: receive exact number of bytes
+ * ---------------------------------------------------------
+ */
+
+static int receive_exact(
+    int socket_fd,
+    void *buffer,
+    size_t length
+)
+{
+    char *data = (char *)buffer;
+    size_t total = 0;
+
+    while (total < length)
+    {
+        ssize_t received = recv(
+            socket_fd,
+            data + total,
+            length - total,
+            0
+        );
+
+        if (received < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            perror("recv");
             return -1;
         }
 
-        total_received += (size_t)received;
+        if (received == 0)
+        {
+            fprintf(
+                stderr,
+                "Connection closed before all expected bytes arrived.\n"
+            );
+
+            return -1;
+        }
+
+        total += (size_t)received;
     }
 
     return 0;
 }
 
+
 /*
- * PUT a local file to the RemoteOps Agent.
+ * ---------------------------------------------------------
+ * Utility: elapsed time
+ * ---------------------------------------------------------
  *
- * Protocol:
- *
- * PUT filename filesize\n
- * <exactly filesize raw bytes>
- *
- * Then receive the Agent's line response.
+ * Returns elapsed time in seconds using a monotonic clock.
+ * CLOCK_MONOTONIC is suitable for measuring transfer duration
+ * because it is not affected by changes to the system clock.
  */
-int put_file(int sock, const char *local_filename)
+
+static double elapsed_seconds(
+    const struct timespec *start,
+    const struct timespec *end
+)
+{
+    double seconds;
+    double nanoseconds;
+
+    seconds = (double)(end->tv_sec - start->tv_sec);
+    nanoseconds = (double)(end->tv_nsec - start->tv_nsec);
+
+    return seconds + (nanoseconds / 1000000000.0);
+}
+
+
+/*
+ * ---------------------------------------------------------
+ * PUT
+ * ---------------------------------------------------------
+ */
+
+static int put_file(
+    int tcp_socket,
+    const char *local_filename
+)
 {
     FILE *file;
-    struct stat file_info;
-
+    long file_size;
     char command[BUFFER_SIZE];
-    char response[RESPONSE_SIZE];
+    char response[BUFFER_SIZE];
 
-    if (stat(local_filename, &file_info) < 0)
-    {
-        perror("stat");
-        return -1;
-    }
-
-    if (!S_ISREG(file_info.st_mode))
-    {
-        printf("PUT error: '%s' is not a regular file.\n",
-               local_filename);
-        return -1;
-    }
-
-    const char *filename = strrchr(local_filename, '/');
-
-    if (filename != NULL)
-    {
-        filename++;
-    }
-    else
-    {
-        filename = local_filename;
-    }
-
-    if (strlen(filename) == 0)
-    {
-        printf("PUT error: invalid filename.\n");
-        return -1;
-    }
-
-    file = fopen(local_filename, "rb");
+    file = fopen(
+        local_filename,
+        "rb"
+    );
 
     if (file == NULL)
     {
@@ -175,496 +253,1234 @@ int put_file(int sock, const char *local_filename)
         return -1;
     }
 
-    int command_length = snprintf(command,
-                                  sizeof(command),
-                                  "PUT %s %lld\n",
-                                  filename,
-                                  (long long)file_info.st_size);
-
-    if (command_length < 0 ||
-        (size_t)command_length >= sizeof(command))
+    if (fseek(file, 0, SEEK_END) != 0)
     {
-        printf("PUT error: command is too long.\n");
+        perror("fseek");
         fclose(file);
         return -1;
     }
 
-    if (send_all(sock,
-                 command,
-                 (size_t)command_length) < 0)
+    file_size = ftell(file);
+
+    if (file_size < 0)
+    {
+        perror("ftell");
+        fclose(file);
+        return -1;
+    }
+
+    if (fseek(file, 0, SEEK_SET) != 0)
+    {
+        perror("fseek");
+        fclose(file);
+        return -1;
+    }
+
+    /*
+     * The assignment protocol is:
+     *
+     * PUT <filename> <filesize>\n
+     * followed immediately by raw bytes.
+     */
+
+    snprintf(
+        command,
+        sizeof(command),
+        "PUT %s %ld\n",
+        local_filename,
+        file_size
+    );
+
+    printf(
+        "Uploading %s (%ld bytes)...\n",
+        local_filename,
+        file_size
+    );
+
+    /*
+     * Start throughput timing immediately before the
+     * PUT command and file bytes are sent.
+     */
+
+    struct timespec start_time;
+    struct timespec end_time;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &start_time) != 0)
+    {
+        perror("clock_gettime");
+        fclose(file);
+        return -1;
+    }
+
+    if (send_all(
+            tcp_socket,
+            command,
+            strlen(command)
+        ) < 0)
     {
         fclose(file);
         return -1;
     }
 
-    char buffer[BUFFER_SIZE];
+    /*
+     * Send the exact file bytes.
+     */
 
-    long long remaining = (long long)file_info.st_size;
+    char buffer[8192];
 
-    while (remaining > 0)
+    while (1)
     {
-        size_t bytes_to_read;
+        size_t bytes_read = fread(
+            buffer,
+            1,
+            sizeof(buffer),
+            file
+        );
 
-        if (remaining > BUFFER_SIZE)
+        if (bytes_read > 0)
         {
-            bytes_to_read = BUFFER_SIZE;
+            if (send_all(
+                    tcp_socket,
+                    buffer,
+                    bytes_read
+                ) < 0)
+            {
+                fclose(file);
+                return -1;
+            }
         }
-        else
-        {
-            bytes_to_read = (size_t)remaining;
-        }
 
-        size_t bytes_read = fread(buffer,
-                                  1,
-                                  bytes_to_read,
-                                  file);
-
-        if (bytes_read == 0)
+        if (bytes_read < sizeof(buffer))
         {
+            if (feof(file))
+            {
+                break;
+            }
+
             if (ferror(file))
             {
                 perror("fread");
+                fclose(file);
+                return -1;
             }
-            else
-            {
-                printf("PUT error: unexpected end of file.\n");
-            }
-
-            fclose(file);
-            return -1;
         }
-
-        if (send_all(sock,
-                     buffer,
-                     bytes_read) < 0)
-        {
-            fclose(file);
-            return -1;
-        }
-
-        remaining -= (long long)bytes_read;
     }
 
     fclose(file);
 
-    memset(response, 0, sizeof(response));
+    /*
+     * Receive the Agent's response.
+     */
 
-    int received = receive_line(sock,
-                                response,
-                                sizeof(response));
+    int result = receive_line(
+        tcp_socket,
+        response,
+        sizeof(response)
+    );
 
-    if (received < 0)
+    if (result <= 0)
     {
         return -1;
     }
 
-    if (received == 0)
+    if (clock_gettime(CLOCK_MONOTONIC, &end_time) != 0)
     {
-        printf("Agent closed the connection.\n");
+        perror("clock_gettime");
         return -1;
     }
 
-    printf("%s", response);
+    printf(
+        "%s",
+        response
+    );
+
+    /*
+     * Throughput is reported only when the transfer succeeded.
+     */
+
+    if (strncmp(
+            response,
+            "OK FILE_RECEIVED",
+            16
+        ) == 0)
+    {
+        double duration = elapsed_seconds(
+            &start_time,
+            &end_time
+        );
+
+        if (duration <= 0.0)
+        {
+            duration = 0.000001;
+        }
+
+        double throughput =
+            (double)file_size / duration;
+
+        printf(
+            "PUT throughput: %.2f bytes/sec\n",
+            throughput
+        );
+    }
 
     return 0;
 }
 
+
 /*
- * GET a file from the RemoteOps Agent.
- *
- * Protocol:
- *
- * GET filename\n
- *
- * Agent response:
- *
- * OK FILE_SEND filename filesize SID:6053\n
- *
- * followed immediately by exactly filesize raw bytes.
- *
- * The received bytes are saved as the local filename.
+ * ---------------------------------------------------------
+ * GET
+ * ---------------------------------------------------------
  */
-int get_file(int sock, const char *filename)
+
+static int get_file(
+    int tcp_socket,
+    const char *remote_filename
+)
 {
     char command[BUFFER_SIZE];
-    char response[RESPONSE_SIZE];
+    char response[BUFFER_SIZE];
+
+    snprintf(
+        command,
+        sizeof(command),
+        "GET %s\n",
+        remote_filename
+    );
 
     /*
-     * Send GET command.
+     * Start timing immediately before sending the GET request.
      */
-    int command_length = snprintf(command,
-                                  sizeof(command),
-                                  "GET %s\n",
-                                  filename);
 
-    if (command_length < 0 ||
-        (size_t)command_length >= sizeof(command))
+    struct timespec start_time;
+    struct timespec end_time;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &start_time) != 0)
     {
-        printf("GET error: command is too long.\n");
+        perror("clock_gettime");
         return -1;
     }
 
-    if (send_all(sock,
-                 command,
-                 (size_t)command_length) < 0)
+    if (send_all(
+            tcp_socket,
+            command,
+            strlen(command)
+        ) < 0)
     {
         return -1;
     }
 
     /*
-     * Receive the FILE_SEND header.
+     * Expected response:
+     *
+     * OK FILE_SEND <filename> <size> SID:6053
      */
-    memset(response, 0, sizeof(response));
 
-    int received = receive_line(sock,
-                                response,
-                                sizeof(response));
+    int result = receive_line(
+        tcp_socket,
+        response,
+        sizeof(response)
+    );
 
-    if (received < 0)
+    if (result <= 0)
     {
         return -1;
     }
 
-    if (received == 0)
-    {
-        printf("Agent closed the connection.\n");
-        return -1;
-    }
-
-    printf("%s", response);
+    printf(
+        "%s",
+        response
+    );
 
     /*
-     * Check whether Agent returned an error.
+     * If this is not a successful FILE_SEND response,
+     * there are no raw file bytes to receive.
      */
-    if (strncmp(response, "OK FILE_SEND ", 13) != 0)
+
+    if (strncmp(
+            response,
+            "OK FILE_SEND ",
+            13
+        ) != 0)
     {
         return 0;
     }
 
-    /*
-     * Parse:
-     *
-     * OK FILE_SEND filename filesize SID:6053
-     */
-    char received_filename[BUFFER_SIZE];
-    long long file_size;
-    char sid[64];
+    char returned_filename[FILENAME_SIZE];
+    unsigned long file_size;
 
-    int fields = sscanf(response,
-                        "OK FILE_SEND %4095s %lld %63s",
-                        received_filename,
-                        &file_size,
-                        sid);
-
-    if (fields != 3)
+    if (sscanf(
+            response,
+            "OK FILE_SEND %255s %lu SID:%*s",
+            returned_filename,
+            &file_size
+        ) != 2)
     {
-        printf("GET error: invalid FILE_SEND header.\n");
+        fprintf(
+            stderr,
+            "Could not parse FILE_SEND response.\n"
+        );
+
         return -1;
     }
 
-    if (file_size < 0)
-    {
-        printf("GET error: invalid file size.\n");
-        return -1;
-    }
-
-    /*
-     * Open local destination file.
-     */
-    FILE *file = fopen(filename, "wb");
+    FILE *file = fopen(
+        remote_filename,
+        "wb"
+    );
 
     if (file == NULL)
     {
         perror("fopen");
+
+        /*
+         * We must still consume the exact number of bytes
+         * from the TCP connection.
+         */
+
+        char discard[8192];
+        unsigned long remaining = file_size;
+
+        while (remaining > 0)
+        {
+            size_t chunk =
+                remaining > sizeof(discard)
+                    ? sizeof(discard)
+                    : (size_t)remaining;
+
+            if (receive_exact(
+                    tcp_socket,
+                    discard,
+                    chunk
+                ) < 0)
+            {
+                return -1;
+            }
+
+            remaining -= chunk;
+        }
+
         return -1;
     }
 
     /*
      * Receive exactly file_size bytes.
      */
-    char buffer[BUFFER_SIZE];
 
-    long long remaining = file_size;
+    char buffer[8192];
+    unsigned long remaining = file_size;
 
     while (remaining > 0)
     {
-        size_t bytes_to_receive;
+        size_t chunk =
+            remaining > sizeof(buffer)
+                ? sizeof(buffer)
+                : (size_t)remaining;
 
-        if (remaining > BUFFER_SIZE)
-        {
-            bytes_to_receive = BUFFER_SIZE;
-        }
-        else
-        {
-            bytes_to_receive = (size_t)remaining;
-        }
-
-        if (receive_exact(sock,
-                          buffer,
-                          bytes_to_receive) < 0)
+        if (receive_exact(
+                tcp_socket,
+                buffer,
+                chunk
+            ) < 0)
         {
             fclose(file);
             return -1;
         }
 
-        size_t bytes_written = fwrite(buffer,
-                                     1,
-                                     bytes_to_receive,
-                                     file);
+        size_t written = fwrite(
+            buffer,
+            1,
+            chunk,
+            file
+        );
 
-        if (bytes_written != bytes_to_receive)
+        if (written != chunk)
         {
             perror("fwrite");
             fclose(file);
             return -1;
         }
 
-        remaining -= (long long)bytes_to_receive;
+        remaining -= chunk;
     }
 
     fclose(file);
 
-    printf("GET completed: %s (%lld bytes)\n",
-           filename,
-           file_size);
+    /*
+     * The complete file has now been received.
+     * Stop throughput timing here.
+     */
+
+    if (clock_gettime(CLOCK_MONOTONIC, &end_time) != 0)
+    {
+        perror("clock_gettime");
+        return -1;
+    }
+
+    printf(
+        "GET completed: %s (%lu bytes)\n",
+        remote_filename,
+        file_size
+    );
+
+    double duration = elapsed_seconds(
+        &start_time,
+        &end_time
+    );
+
+    if (duration <= 0.0)
+    {
+        duration = 0.000001;
+    }
+
+    double throughput =
+        (double)file_size / duration;
+
+    printf(
+        "GET throughput: %.2f bytes/sec\n",
+        throughput
+    );
 
     return 0;
 }
 
-int main(void)
+
+/*
+ * ---------------------------------------------------------
+ * UDP monitoring
+ * ---------------------------------------------------------
+ */
+
+typedef struct
 {
-    int sock;
-    struct sockaddr_in server_addr;
+    int socket_fd;
+    volatile int running;
+} monitor_context_t;
 
-    char command[BUFFER_SIZE];
-    char *response;
 
-    response = malloc(RESPONSE_SIZE);
+/*
+ * UDP receiver thread.
+ */
 
-    if (response == NULL)
+static void *monitor_receiver(void *argument)
+{
+    monitor_context_t *context =
+        (monitor_context_t *)argument;
+
+    char buffer[BUFFER_SIZE];
+
+    struct sockaddr_in sender_address;
+    socklen_t sender_length =
+        sizeof(sender_address);
+
+    while (context->running)
     {
-        perror("malloc");
+        /*
+         * Use select() with a short timeout so the thread
+         * can periodically check the running flag.
+         */
+
+        fd_set read_set;
+
+        FD_ZERO(&read_set);
+
+        FD_SET(
+            context->socket_fd,
+            &read_set
+        );
+
+        struct timeval timeout;
+
+        timeout.tv_sec = 1;
+        timeout.tv_usec = 0;
+
+        int ready = select(
+            context->socket_fd + 1,
+            &read_set,
+            NULL,
+            NULL,
+            &timeout
+        );
+
+        if (ready < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+
+            perror("select");
+            break;
+        }
+
+        if (ready == 0)
+        {
+            continue;
+        }
+
+        if (FD_ISSET(
+                context->socket_fd,
+                &read_set
+            ))
+        {
+            ssize_t received = recvfrom(
+                context->socket_fd,
+                buffer,
+                sizeof(buffer) - 1,
+                0,
+                (struct sockaddr *)&sender_address,
+                &sender_length
+            );
+
+            if (received < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+
+                if (!context->running)
+                {
+                    break;
+                }
+
+                perror("recvfrom");
+                break;
+            }
+
+            buffer[received] = '\0';
+
+            printf(
+                "\nUDP: %s\n",
+                buffer
+            );
+
+            printf(
+                "RemoteOps> "
+            );
+
+            fflush(stdout);
+        }
+    }
+
+    return NULL;
+}
+
+
+/*
+ * Create and bind UDP monitoring socket.
+ */
+
+static int create_monitor_socket(
+    int udp_port
+)
+{
+    int udp_socket;
+
+    struct sockaddr_in address;
+
+    udp_socket = socket(
+        AF_INET,
+        SOCK_DGRAM,
+        0
+    );
+
+    if (udp_socket < 0)
+    {
+        perror("socket UDP");
+        return -1;
+    }
+
+    int option = 1;
+
+    if (setsockopt(
+            udp_socket,
+            SOL_SOCKET,
+            SO_REUSEADDR,
+            &option,
+            sizeof(option)
+        ) < 0)
+    {
+        perror("setsockopt UDP");
+
+        close(udp_socket);
+
+        return -1;
+    }
+
+    memset(
+        &address,
+        0,
+        sizeof(address)
+    );
+
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(
+        (unsigned short)udp_port
+    );
+
+    if (bind(
+            udp_socket,
+            (struct sockaddr *)&address,
+            sizeof(address)
+        ) < 0)
+    {
+        perror("bind UDP");
+
+        close(udp_socket);
+
+        return -1;
+    }
+
+    return udp_socket;
+}
+
+
+/*
+ * Start monitoring.
+ *
+ * The UDP socket is created BEFORE the MONITOR START command
+ * is sent to the Agent. This prevents early UDP packets from
+ * being lost.
+ */
+
+static int monitor_start(
+    int tcp_socket,
+    int udp_port
+)
+{
+    char command[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+
+    int udp_socket = create_monitor_socket(
+        udp_port
+    );
+
+    if (udp_socket < 0)
+    {
+        return -1;
+    }
+
+    snprintf(
+        command,
+        sizeof(command),
+        "MONITOR START %d\n",
+        udp_port
+    );
+
+    if (send_all(
+            tcp_socket,
+            command,
+            strlen(command)
+        ) < 0)
+    {
+        close(udp_socket);
+        return -1;
+    }
+
+    int result = receive_line(
+        tcp_socket,
+        response,
+        sizeof(response)
+    );
+
+    if (result <= 0)
+    {
+        close(udp_socket);
+        return -1;
+    }
+
+    printf(
+        "%s",
+        response
+    );
+
+    if (strncmp(
+            response,
+            "OK MONITOR_STARTED",
+            18
+        ) != 0)
+    {
+        close(udp_socket);
+        return 0;
+    }
+
+    monitor_context_t context;
+
+    context.socket_fd = udp_socket;
+    context.running = 1;
+
+    pthread_t monitor_thread;
+
+    if (pthread_create(
+            &monitor_thread,
+            NULL,
+            monitor_receiver,
+            &context
+        ) != 0)
+    {
+        perror("pthread_create");
+
+        close(udp_socket);
+
+        return -1;
+    }
+
+    printf(
+        "UDP monitoring active on port %d.\n",
+        udp_port
+    );
+
+    printf(
+        "Use MONITOR STOP to stop monitoring.\n"
+    );
+
+    /*
+     * Wait for the user to enter MONITOR STOP.
+     *
+     * UDP packets are handled by the monitor thread while
+     * this thread waits for keyboard input.
+     */
+
+    while (1)
+    {
+        char input[BUFFER_SIZE];
+
+        printf(
+            "RemoteOps> "
+        );
+
+        fflush(stdout);
+
+        if (fgets(
+                input,
+                sizeof(input),
+                stdin
+            ) == NULL)
+        {
+            /*
+             * Keyboard input closed.
+             * Stop local UDP monitoring.
+             */
+
+            context.running = 0;
+
+            pthread_join(
+                monitor_thread,
+                NULL
+            );
+
+            close(udp_socket);
+
+            return -1;
+        }
+
+        input[strcspn(
+            input,
+            "\r\n"
+        )] = '\0';
+
+        if (strcmp(
+                input,
+                "MONITOR STOP"
+            ) == 0)
+        {
+            /*
+             * Tell the Agent to stop sending UDP packets.
+             */
+
+            snprintf(
+                command,
+                sizeof(command),
+                "MONITOR STOP\n"
+            );
+
+            if (send_all(
+                    tcp_socket,
+                    command,
+                    strlen(command)
+                ) < 0)
+            {
+                context.running = 0;
+
+                pthread_join(
+                    monitor_thread,
+                    NULL
+                );
+
+                close(udp_socket);
+
+                return -1;
+            }
+
+            result = receive_line(
+                tcp_socket,
+                response,
+                sizeof(response)
+            );
+
+            if (result > 0)
+            {
+                printf(
+                    "%s",
+                    response
+                );
+            }
+
+            /*
+             * Stop local UDP receiver thread.
+             */
+
+            context.running = 0;
+
+            pthread_join(
+                monitor_thread,
+                NULL
+            );
+
+            close(udp_socket);
+
+            return 0;
+        }
+
+        printf(
+            "Monitoring active. Use: MONITOR STOP\n"
+        );
+    }
+}
+
+
+/*
+ * ---------------------------------------------------------
+ * Main
+ * ---------------------------------------------------------
+ */
+
+int main(
+    int argc,
+    char *argv[]
+)
+{
+    const char *agent_ip = AGENT_IP;
+    int agent_port = AGENT_PORT;
+
+    /*
+     * Optional:
+     *
+     * ./controller
+     * ./controller 127.0.0.1 9410
+     */
+
+    if (argc >= 2)
+    {
+        agent_ip = argv[1];
+    }
+
+    if (argc >= 3)
+    {
+        agent_port = atoi(argv[2]);
+
+        if (agent_port <= 0 ||
+            agent_port > 65535)
+        {
+            fprintf(
+                stderr,
+                "Invalid port number.\n"
+            );
+
+            return 1;
+        }
+    }
+
+    if (argc > 3)
+    {
+        fprintf(
+            stderr,
+            "Usage: %s [agent_ip] [agent_port]\n",
+            argv[0]
+        );
+
         return 1;
     }
 
-    /* Create TCP socket */
-    sock = socket(AF_INET, SOCK_STREAM, 0);
+    /*
+     * Create TCP socket.
+     */
 
-    if (sock < 0)
+    int tcp_socket = socket(
+        AF_INET,
+        SOCK_STREAM,
+        0
+    );
+
+    if (tcp_socket < 0)
     {
         perror("socket");
-        free(response);
         return 1;
     }
 
-    /* Prepare server address */
-    memset(&server_addr, 0, sizeof(server_addr));
+    /*
+     * Configure Agent address.
+     */
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(PORT);
+    struct sockaddr_in agent_address;
 
-    if (inet_pton(AF_INET,
-                  SERVER_IP,
-                  &server_addr.sin_addr) <= 0)
+    memset(
+        &agent_address,
+        0,
+        sizeof(agent_address)
+    );
+
+    agent_address.sin_family =
+        AF_INET;
+
+    agent_address.sin_port =
+        htons(
+            (unsigned short)agent_port
+        );
+
+    if (inet_pton(
+            AF_INET,
+            agent_ip,
+            &agent_address.sin_addr
+        ) <= 0)
     {
-        perror("inet_pton");
-        close(sock);
-        free(response);
+        fprintf(
+            stderr,
+            "Invalid Agent IP address: %s\n",
+            agent_ip
+        );
+
+        close(tcp_socket);
+
         return 1;
     }
 
-    /* Connect to Agent */
-    if (connect(sock,
-                (struct sockaddr *)&server_addr,
-                sizeof(server_addr)) < 0)
+    /*
+     * Connect to Agent.
+     */
+
+    if (connect(
+            tcp_socket,
+            (struct sockaddr *)&agent_address,
+            sizeof(agent_address)
+        ) < 0)
     {
         perror("connect");
-        close(sock);
-        free(response);
+
+        close(tcp_socket);
+
         return 1;
     }
 
-    printf("Connected to RemoteOps Agent.\n");
+    printf(
+        "Connected to RemoteOps Agent.\n"
+    );
 
     /*
      * AUTH must be the first command.
      */
-    snprintf(command,
-             sizeof(command),
-             "AUTH %s\n",
-             AUTH_TOKEN);
 
-    if (send_all(sock,
-                 command,
-                 strlen(command)) < 0)
+    char auth_command[BUFFER_SIZE];
+    char response[BUFFER_SIZE];
+
+    snprintf(
+        auth_command,
+        sizeof(auth_command),
+        "AUTH %s\n",
+        AUTH_TOKEN
+    );
+
+    if (send_all(
+            tcp_socket,
+            auth_command,
+            strlen(auth_command)
+        ) < 0)
     {
-        close(sock);
-        free(response);
+        close(tcp_socket);
         return 1;
     }
 
-    memset(response, 0, RESPONSE_SIZE);
+    int result = receive_line(
+        tcp_socket,
+        response,
+        sizeof(response)
+    );
 
-    int received = receive_line(sock,
-                                response,
-                                RESPONSE_SIZE);
-
-    if (received < 0)
+    if (result <= 0)
     {
-        close(sock);
-        free(response);
+        close(tcp_socket);
         return 1;
     }
 
-    if (received == 0)
+    printf(
+        "Agent response: %s",
+        response
+    );
+
+    if (strncmp(
+            response,
+            "OK AUTHENTICATED",
+            16
+        ) != 0)
     {
-        printf("Agent closed the connection.\n");
-        close(sock);
-        free(response);
+        fprintf(
+            stderr,
+            "Authentication failed.\n"
+        );
+
+        close(tcp_socket);
+
         return 1;
     }
-
-    printf("Agent response: %s", response);
 
     /*
-     * Interactive command loop.
+     * Main command loop.
      */
+
+    char input[BUFFER_SIZE];
+
     while (1)
     {
-        printf("\nRemoteOps> ");
+        printf(
+            "\nRemoteOps> "
+        );
+
         fflush(stdout);
 
-        if (fgets(command,
-                  sizeof(command),
-                  stdin) == NULL)
+        if (fgets(
+                input,
+                sizeof(input),
+                stdin
+            ) == NULL)
         {
             break;
         }
 
-        /* Remove newline from user input */
-        command[strcspn(command, "\n")] = '\0';
+        input[strcspn(
+            input,
+            "\r\n"
+        )] = '\0';
 
-        /* Ignore empty commands */
-        if (strlen(command) == 0)
+        if (input[0] == '\0')
         {
             continue;
         }
 
         /*
-         * Detect PUT command.
-         *
-         * Expected:
-         *
-         * PUT test.txt
+         * -------------------------------------------------
+         * QUIT
+         * -------------------------------------------------
          */
-        if (strncmp(command, "PUT ", 4) == 0)
-        {
-            char filename[BUFFER_SIZE];
 
-            if (sscanf(command + 4,
-                       "%4095s",
-                       filename) != 1)
+        if (strcmp(
+                input,
+                "QUIT"
+            ) == 0)
+        {
+            char command[BUFFER_SIZE];
+
+            snprintf(
+                command,
+                sizeof(command),
+                "QUIT\n"
+            );
+
+            if (send_all(
+                    tcp_socket,
+                    command,
+                    strlen(command)
+                ) < 0)
             {
-                printf("Usage: PUT <filename>\n");
+                break;
+            }
+
+            result = receive_line(
+                tcp_socket,
+                response,
+                sizeof(response)
+            );
+
+            if (result > 0)
+            {
+                printf(
+                    "%s",
+                    response
+                );
+            }
+
+            break;
+        }
+
+        /*
+         * -------------------------------------------------
+         * PUT
+         * -------------------------------------------------
+         */
+
+        if (strncmp(
+                input,
+                "PUT ",
+                4
+            ) == 0)
+        {
+            char filename[FILENAME_SIZE];
+
+            if (sscanf(
+                    input + 4,
+                    "%255s",
+                    filename
+                ) != 1)
+            {
+                printf(
+                    "Usage: PUT <local_filename>\n"
+                );
+
                 continue;
             }
 
-            if (put_file(sock, filename) < 0)
-            {
-                printf("PUT failed.\n");
-            }
+            put_file(
+                tcp_socket,
+                filename
+            );
 
             continue;
         }
 
         /*
-         * Detect GET command.
-         *
-         * Expected:
-         *
-         * GET test.txt
+         * -------------------------------------------------
+         * GET
+         * -------------------------------------------------
          */
-        if (strncmp(command, "GET ", 4) == 0)
-        {
-            char filename[BUFFER_SIZE];
 
-            if (sscanf(command + 4,
-                       "%4095s",
-                       filename) != 1)
+        if (strncmp(
+                input,
+                "GET ",
+                4
+            ) == 0)
+        {
+            char filename[FILENAME_SIZE];
+
+            if (sscanf(
+                    input + 4,
+                    "%255s",
+                    filename
+                ) != 1)
             {
-                printf("Usage: GET <filename>\n");
+                printf(
+                    "Usage: GET <filename>\n"
+                );
+
                 continue;
             }
 
-            if (get_file(sock, filename) < 0)
+            get_file(
+                tcp_socket,
+                filename
+            );
+
+            continue;
+        }
+
+        /*
+         * -------------------------------------------------
+         * MONITOR START
+         * -------------------------------------------------
+         */
+
+        if (strncmp(
+                input,
+                "MONITOR START ",
+                14
+            ) == 0)
+        {
+            int udp_port;
+
+            if (sscanf(
+                    input + 14,
+                    "%d",
+                    &udp_port
+                ) != 1)
             {
-                printf("GET failed.\n");
+                printf(
+                    "Usage: MONITOR START <udp_port>\n"
+                );
+
+                continue;
             }
 
+            if (udp_port <= 0 ||
+                udp_port > 65535)
+            {
+                printf(
+                    "Invalid UDP port.\n"
+                );
+
+                continue;
+            }
+
+            monitor_start(
+                tcp_socket,
+                udp_port
+            );
+
             continue;
         }
 
         /*
-         * Add protocol newline for normal commands.
+         * -------------------------------------------------
+         * Normal command
+         * -------------------------------------------------
          */
-        size_t length = strlen(command);
-
-        if (length + 1 >= sizeof(command))
-        {
-            printf("Command is too long.\n");
-            continue;
-        }
-
-        command[length] = '\n';
-        command[length + 1] = '\0';
 
         /*
-         * Send normal command to Agent.
+         * Send the existing input directly followed by '\n'.
+         * This avoids unnecessary snprintf truncation warnings.
          */
-        if (send_all(sock,
-                     command,
-                     strlen(command)) < 0)
+
+        size_t input_length = strlen(input);
+
+        if (send_all(
+                tcp_socket,
+                input,
+                input_length
+            ) < 0)
         {
             break;
         }
 
-        /*
-         * Receive the complete line-based response.
-         */
-        memset(response, 0, RESPONSE_SIZE);
-
-        received = receive_line(sock,
-                                response,
-                                RESPONSE_SIZE);
-
-        if (received < 0)
+        if (send_all(
+                tcp_socket,
+                "\n",
+                1
+            ) < 0)
         {
             break;
         }
 
-        if (received == 0)
-        {
-            printf("Agent closed the connection.\n");
-            break;
-        }
+        result = receive_line(
+            tcp_socket,
+            response,
+            sizeof(response)
+        );
 
-        printf("%s", response);
-
-        /*
-         * End Controller after QUIT.
-         */
-        if (strncmp(response,
-                    "OK BYE",
-                    6) == 0)
+        if (result <= 0)
         {
             break;
         }
+
+        printf(
+            "%s",
+            response
+        );
     }
 
-    close(sock);
-    free(response);
+    close(tcp_socket);
 
-    printf("Disconnected from RemoteOps Agent.\n");
+    printf(
+        "Controller closed.\n"
+    );
 
     return 0;
 }
