@@ -1,4 +1,5 @@
 agent
+controller
 *.o
 *.log
 agentfiles/
