@@ -1425,68 +1425,58 @@ void handle_exec(
  */
 
 void write_log(const char *message)
-
 {
-
     FILE *log_file;
-
-
+    time_t current_time;
+    struct tm *time_info;
+    char timestamp[32];
 
     pthread_mutex_lock(&log_mutex);
 
-
-
     log_file =
-
         fopen(
-
             LOG_FILE,
-
             "a"
-
         );
 
-
-
     if (log_file == NULL)
-
     {
-
         pthread_mutex_unlock(&log_mutex);
-
         return;
-
     }
 
+    current_time = time(NULL);
+    time_info = localtime(&current_time);
 
+    if (time_info != NULL)
+    {
+        strftime(
+            timestamp,
+            sizeof(timestamp),
+            "%Y-%m-%d %H:%M:%S",
+            time_info
+        );
 
-
-
-    fprintf(
-
-        log_file,
-
-        "%s\n",
-
-        message
-
-    );
-
-
-
-
+        fprintf(
+            log_file,
+            "[%s] %s\n",
+            timestamp,
+            message
+        );
+    }
+    else
+    {
+        fprintf(
+            log_file,
+            "%s\n",
+            message
+        );
+    }
 
     fclose(log_file);
 
-
-
     pthread_mutex_unlock(&log_mutex);
-
 }
-
-
-
-
 
 /*
 
