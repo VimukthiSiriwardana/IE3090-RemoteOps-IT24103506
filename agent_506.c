@@ -1,7 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
 
-
-
 #include <stdio.h>
 
 #include <stdlib.h>
@@ -27,41 +25,27 @@
 #include <pthread.h>
 #include <time.h>
 
-
-
 #define PORT 9410
 
 #define BUFFER_SIZE 1024
-
-
 
 #define AUTH_TOKEN "OPS-3506"
 
 #define SID "6053"
 
-
-
 #define LOG_FILE "remoteops_IT24103506.log"
 
 #define STORAGE_PATH "./agentfiles/IT24103506"
 
-
-
 #define BACKLOG 5
 
-
-
 #define MAX_FILE_SIZE (10ULL * 1024ULL * 1024ULL)
-
-
 
 /* Protect concurrent writes to the shared log file. */
 
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 pthread_cond_t monitor_condition = PTHREAD_COND_INITIALIZER;
-
-
 
 /*
 
@@ -79,10 +63,6 @@ typedef struct
 
 } client_context_t;
 
-
-
-
-
 /*
 
  * Per-Controller UDP monitoring state.
@@ -98,27 +78,15 @@ typedef struct
         pthread_cond_t condition;
 pthread_t thread_id;
 
-
-
     int running;
 
     int stop_requested;
 
-
-
     int udp_socket;
-
-
 
     struct sockaddr_in destination;
 
-
-
 } monitor_context_t;
-
-
-
-
 
 /*
 
@@ -138,15 +106,11 @@ int read_line(int socket_fd, char *buffer, size_t size)
 
     size_t position = 0;
 
-
-
     while (position < size - 1)
 
     {
 
         char character;
-
-
 
         ssize_t received = recv(
 
@@ -160,8 +124,6 @@ int read_line(int socket_fd, char *buffer, size_t size)
 
         );
 
-
-
         if (received == 0)
 
         {
@@ -169,8 +131,6 @@ int read_line(int socket_fd, char *buffer, size_t size)
             return 0;
 
         }
-
-
 
         if (received < 0)
 
@@ -180,11 +140,7 @@ int read_line(int socket_fd, char *buffer, size_t size)
 
         }
 
-
-
         buffer[position++] = character;
-
-
 
         if (character == '\n')
 
@@ -196,19 +152,11 @@ int read_line(int socket_fd, char *buffer, size_t size)
 
     }
 
-
-
     buffer[position] = '\0';
-
-
 
     return 1;
 
 }
-
-
-
-
 
 /*
 
@@ -230,8 +178,6 @@ int send_all(
 
     size_t total_sent = 0;
 
-
-
     while (total_sent < length)
 
     {
@@ -248,8 +194,6 @@ int send_all(
 
         );
 
-
-
         if (sent <= 0)
 
         {
@@ -258,21 +202,13 @@ int send_all(
 
         }
 
-
-
         total_sent += (size_t)sent;
 
     }
 
-
-
     return 0;
 
 }
-
-
-
-
 
 /*
 
@@ -294,8 +230,6 @@ ssize_t receive_exact_bytes(
 
     size_t received = 0;
 
-
-
     while (received < total_bytes)
 
     {
@@ -312,8 +246,6 @@ ssize_t receive_exact_bytes(
 
         );
 
-
-
         if (n <= 0)
 
         {
@@ -322,21 +254,13 @@ ssize_t receive_exact_bytes(
 
         }
 
-
-
         received += (size_t)n;
 
     }
 
-
-
     return (ssize_t)received;
 
 }
-
-
-
-
 
 /*
 
@@ -370,23 +294,13 @@ int get_system_info(
 
     FILE *uptime_file;
 
-
-
     double load_1min;
-
-
 
     long mem_total_kb = 0;
 
     long mem_available_kb = 0;
 
-
-
     char line[256];
-
-
-
-
 
     load_file = fopen(
 
@@ -396,8 +310,6 @@ int get_system_info(
 
     );
 
-
-
     if (load_file == NULL)
 
     {
@@ -405,8 +317,6 @@ int get_system_info(
         return -1;
 
     }
-
-
 
     if (fscanf(
 
@@ -426,13 +336,7 @@ int get_system_info(
 
     }
 
-
-
     fclose(load_file);
-
-
-
-
 
     memory_file = fopen(
 
@@ -442,8 +346,6 @@ int get_system_info(
 
     );
 
-
-
     if (memory_file == NULL)
 
     {
@@ -451,8 +353,6 @@ int get_system_info(
         return -1;
 
     }
-
-
 
     while (fgets(
 
@@ -482,8 +382,6 @@ int get_system_info(
 
         }
 
-
-
         if (sscanf(
 
                 line,
@@ -502,13 +400,7 @@ int get_system_info(
 
     }
 
-
-
     fclose(memory_file);
-
-
-
-
 
     uptime_file = fopen(
 
@@ -518,8 +410,6 @@ int get_system_info(
 
     );
 
-
-
     if (uptime_file == NULL)
 
     {
@@ -528,11 +418,7 @@ int get_system_info(
 
     }
 
-
-
     double uptime_value;
-
-
 
     if (fscanf(
 
@@ -552,43 +438,25 @@ int get_system_info(
 
     }
 
-
-
     fclose(uptime_file);
 
-
-
-
-
     *cpu_load = load_1min;
-
-
 
     long memory_used_kb =
 
         mem_total_kb - mem_available_kb;
 
-
-
     *memory_used_mb =
 
         memory_used_kb / 1024;
-
-
 
     *uptime_sec =
 
         (long)uptime_value;
 
-
-
     return 0;
 
 }
-
-
-
-
 
 /*
 
@@ -606,13 +474,7 @@ void handle_sysinfo(int client_socket)
 
     long uptime_sec;
 
-
-
     char response[BUFFER_SIZE];
-
-
-
-
 
     if (get_system_info(
 
@@ -638,8 +500,6 @@ void handle_sysinfo(int client_socket)
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -650,15 +510,9 @@ void handle_sysinfo(int client_socket)
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     snprintf(
 
@@ -678,10 +532,6 @@ void handle_sysinfo(int client_socket)
 
     );
 
-
-
-
-
     send_all(
 
         client_socket,
@@ -693,10 +543,6 @@ void handle_sysinfo(int client_socket)
     );
 
 }
-
-
-
-
 
 /*
 
@@ -716,25 +562,13 @@ void handle_listproc(int client_socket)
 
     DIR *proc_directory;
 
-
-
     struct dirent *entry;
-
-
 
     char response[16384];
 
-
-
     size_t used = 0;
 
-
-
     int first_process = 1;
-
-
-
-
 
     proc_directory = opendir(
 
@@ -742,15 +576,11 @@ void handle_listproc(int client_socket)
 
     );
 
-
-
     if (proc_directory == NULL)
 
     {
 
         char error_response[BUFFER_SIZE];
-
-
 
         snprintf(
 
@@ -764,8 +594,6 @@ void handle_listproc(int client_socket)
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -776,15 +604,9 @@ void handle_listproc(int client_socket)
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     used = snprintf(
 
@@ -796,10 +618,6 @@ void handle_listproc(int client_socket)
 
     );
 
-
-
-
-
     while ((entry = readdir(proc_directory)) != NULL)
 
     {
@@ -807,10 +625,6 @@ void handle_listproc(int client_socket)
         const char *name =
 
             entry->d_name;
-
-
-
-
 
         if (!isdigit(
 
@@ -824,13 +638,7 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
-
-
         int numeric = 1;
-
-
 
         for (size_t i = 0;
 
@@ -856,10 +664,6 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
-
-
         if (!numeric)
 
         {
@@ -868,13 +672,7 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
-
-
         char comm_path[256];
-
-
 
         snprintf(
 
@@ -888,10 +686,6 @@ void handle_listproc(int client_socket)
 
         );
 
-
-
-
-
         FILE *comm_file =
 
             fopen(
@@ -902,8 +696,6 @@ void handle_listproc(int client_socket)
 
             );
 
-
-
         if (comm_file == NULL)
 
         {
@@ -912,13 +704,7 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
-
-
         char process_name[128];
-
-
 
         if (fgets(
 
@@ -938,13 +724,7 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
         fclose(comm_file);
-
-
-
-
 
         process_name[
 
@@ -958,13 +738,7 @@ void handle_listproc(int client_socket)
 
         ] = '\0';
 
-
-
-
-
         char process_entry[200];
-
-
 
         snprintf(
 
@@ -980,13 +754,7 @@ void handle_listproc(int client_socket)
 
         );
 
-
-
-
-
         size_t required;
-
-
 
         if (first_process)
 
@@ -1008,17 +776,9 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
-
-
         size_t sid_space =
 
             strlen(" SID:6053\n");
-
-
-
-
 
         if (used +
 
@@ -1034,10 +794,6 @@ void handle_listproc(int client_socket)
 
         }
 
-
-
-
-
         if (!first_process)
 
         {
@@ -1045,10 +801,6 @@ void handle_listproc(int client_socket)
             response[used++] = ',';
 
         }
-
-
-
-
 
         memcpy(
 
@@ -1060,29 +812,15 @@ void handle_listproc(int client_socket)
 
         );
 
-
-
         used += strlen(process_entry);
 
-
-
         response[used] = '\0';
-
-
 
         first_process = 0;
 
     }
 
-
-
-
-
     closedir(proc_directory);
-
-
-
-
 
     snprintf(
 
@@ -1096,10 +834,6 @@ void handle_listproc(int client_socket)
 
     );
 
-
-
-
-
     send_all(
 
         client_socket,
@@ -1111,10 +845,6 @@ void handle_listproc(int client_socket)
     );
 
 }
-
-
-
-
 
 /*
 
@@ -1154,17 +884,9 @@ void handle_exec(
 
     const char *system_command = NULL;
 
-
-
     char output[BUFFER_SIZE];
 
-
-
     char response[BUFFER_SIZE * 2];
-
-
-
-
 
     if (strcmp(
 
@@ -1254,8 +976,6 @@ void handle_exec(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -1266,15 +986,9 @@ void handle_exec(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     FILE *process =
 
@@ -1285,8 +999,6 @@ void handle_exec(
             "r"
 
         );
-
-
 
     if (process == NULL)
 
@@ -1304,8 +1016,6 @@ void handle_exec(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -1316,25 +1026,13 @@ void handle_exec(
 
         );
 
-
-
         return;
 
     }
 
-
-
-
-
     size_t used = 0;
 
-
-
     output[0] = '\0';
-
-
-
-
 
     while (fgets(
 
@@ -1350,8 +1048,6 @@ void handle_exec(
 
         used = strlen(output);
 
-
-
         if (used >= sizeof(output) - 1)
 
         {
@@ -1362,15 +1058,7 @@ void handle_exec(
 
     }
 
-
-
-
-
     pclose(process);
-
-
-
-
 
     output[strcspn(
 
@@ -1379,10 +1067,6 @@ void handle_exec(
         "\r\n"
 
     )] = '\0';
-
-
-
-
 
     snprintf(
 
@@ -1398,10 +1082,6 @@ void handle_exec(
 
     );
 
-
-
-
-
     send_all(
 
         client_socket,
@@ -1414,30 +1094,30 @@ void handle_exec(
 
 }
 
-
-
-
-
 /*
 
  * Write an event to the personalised log file.
 
  */
 
+/*
+ * Write an event to the personalised log file.
+ */
+
 void write_log(const char *message)
 {
     FILE *log_file;
+
     time_t current_time;
     struct tm *time_info;
     char timestamp[32];
 
     pthread_mutex_lock(&log_mutex);
 
-    log_file =
-        fopen(
-            LOG_FILE,
-            "a"
-        );
+    log_file = fopen(
+        LOG_FILE,
+        "a"
+    );
 
     if (log_file == NULL)
     {
@@ -1482,8 +1162,6 @@ void write_log(const char *message)
 
  * Validate a filename.
 
-
-
  *
 
  * Reject:
@@ -1516,10 +1194,6 @@ int valid_filename(
 
     }
 
-
-
-
-
     if (filename[0] == '\0')
 
     {
@@ -1527,10 +1201,6 @@ int valid_filename(
         return 0;
 
     }
-
-
-
-
 
     if (strstr(
 
@@ -1546,10 +1216,6 @@ int valid_filename(
 
     }
 
-
-
-
-
     if (strstr(
 
             filename,
@@ -1564,17 +1230,9 @@ int valid_filename(
 
     }
 
-
-
-
-
     return 1;
 
 }
-
-
-
-
 
 /*
 
@@ -1608,13 +1266,7 @@ void handle_put(
 
     char path[PATH_MAX];
 
-
-
     char response[BUFFER_SIZE];
-
-
-
-
 
     if (!valid_filename(filename))
 
@@ -1632,8 +1284,6 @@ void handle_put(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -1644,15 +1294,9 @@ void handle_put(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     if (filesize > MAX_FILE_SIZE)
 
@@ -1670,8 +1314,6 @@ void handle_put(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -1682,15 +1324,9 @@ void handle_put(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     snprintf(
 
@@ -1706,10 +1342,6 @@ void handle_put(
 
     );
 
-
-
-
-
     FILE *output_file =
 
         fopen(
@@ -1719,8 +1351,6 @@ void handle_put(
             "wb"
 
         );
-
-
 
     if (output_file == NULL)
 
@@ -1738,8 +1368,6 @@ void handle_put(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -1750,37 +1378,21 @@ void handle_put(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     unsigned long long remaining =
 
         filesize;
 
-
-
-
-
     char buffer[4096];
-
-
-
-
 
     while (remaining > 0)
 
     {
 
         size_t chunk_size;
-
-
 
         if (remaining > sizeof(buffer))
 
@@ -1802,10 +1414,6 @@ void handle_put(
 
         }
 
-
-
-
-
         ssize_t received =
 
             recv(
@@ -1820,27 +1428,17 @@ void handle_put(
 
             );
 
-
-
         if (received <= 0)
 
         {
 
             fclose(output_file);
 
-
-
             unlink(path);
-
-
 
             return;
 
         }
-
-
-
-
 
         size_t written =
 
@@ -1856,10 +1454,6 @@ void handle_put(
 
             );
 
-
-
-
-
         if (written !=
 
             (size_t)received)
@@ -1868,11 +1462,7 @@ void handle_put(
 
             fclose(output_file);
 
-
-
             unlink(path);
-
-
 
             snprintf(
 
@@ -1886,8 +1476,6 @@ void handle_put(
 
             );
 
-
-
             send_all(
 
                 client_socket,
@@ -1898,15 +1486,9 @@ void handle_put(
 
             );
 
-
-
             return;
 
         }
-
-
-
-
 
         remaining -=
 
@@ -1914,15 +1496,7 @@ void handle_put(
 
     }
 
-
-
-
-
     fclose(output_file);
-
-
-
-
 
     snprintf(
 
@@ -1938,10 +1512,6 @@ void handle_put(
 
     );
 
-
-
-
-
     send_all(
 
         client_socket,
@@ -1953,10 +1523,6 @@ void handle_put(
     );
 
 }
-
-
-
-
 
 /*
 
@@ -1984,13 +1550,7 @@ void process_put_command(
 
     char filename[256];
 
-
-
     unsigned long long filesize;
-
-
-
-
 
     if (sscanf(
 
@@ -2008,8 +1568,6 @@ void process_put_command(
 
         char response[BUFFER_SIZE];
 
-
-
         snprintf(
 
             response,
@@ -2022,8 +1580,6 @@ void process_put_command(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2034,15 +1590,9 @@ void process_put_command(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     handle_put(
 
@@ -2055,10 +1605,6 @@ void process_put_command(
     );
 
 }
-
-
-
-
 
 /*
 
@@ -2098,13 +1644,7 @@ void handle_get(
 
     char path[PATH_MAX];
 
-
-
     char response[BUFFER_SIZE];
-
-
-
-
 
     /*
 
@@ -2128,8 +1668,6 @@ void handle_get(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2140,15 +1678,9 @@ void handle_get(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     /*
 
@@ -2170,10 +1702,6 @@ void handle_get(
 
     );
 
-
-
-
-
     if (path_result < 0 ||
 
         (size_t)path_result >= sizeof(path))
@@ -2192,8 +1720,6 @@ void handle_get(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2204,15 +1730,9 @@ void handle_get(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     /*
 
@@ -2230,10 +1750,6 @@ void handle_get(
 
         );
 
-
-
-
-
     if (input_file == NULL)
 
     {
@@ -2250,8 +1766,6 @@ void handle_get(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2262,15 +1776,9 @@ void handle_get(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     /*
 
@@ -2279,8 +1787,6 @@ void handle_get(
      */
 
     struct stat file_info;
-
-
 
     if (stat(
 
@@ -2294,8 +1800,6 @@ void handle_get(
 
         fclose(input_file);
 
-
-
         snprintf(
 
             response,
@@ -2308,8 +1812,6 @@ void handle_get(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2320,15 +1822,9 @@ void handle_get(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     /*
 
@@ -2342,8 +1838,6 @@ void handle_get(
 
         fclose(input_file);
 
-
-
         snprintf(
 
             response,
@@ -2356,8 +1850,6 @@ void handle_get(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2368,23 +1860,13 @@ void handle_get(
 
         );
 
-
-
         return;
 
     }
 
-
-
-
-
     unsigned long long filesize =
 
         (unsigned long long)file_info.st_size;
-
-
-
-
 
     /*
 
@@ -2408,10 +1890,6 @@ void handle_get(
 
     );
 
-
-
-
-
     if (send_all(
 
             client_socket,
@@ -2430,10 +1908,6 @@ void handle_get(
 
     }
 
-
-
-
-
     /*
 
      * Send exactly filesize bytes.
@@ -2442,15 +1916,9 @@ void handle_get(
 
     char buffer[4096];
 
-
-
     unsigned long long total_sent =
 
         0;
-
-
-
-
 
     while (total_sent < filesize)
 
@@ -2460,13 +1928,7 @@ void handle_get(
 
             filesize - total_sent;
 
-
-
-
-
         size_t chunk_size;
-
-
 
         if (remaining > sizeof(buffer))
 
@@ -2488,10 +1950,6 @@ void handle_get(
 
         }
 
-
-
-
-
         size_t bytes_read =
 
             fread(
@@ -2505,10 +1963,6 @@ void handle_get(
                 input_file
 
             );
-
-
-
-
 
         if (bytes_read == 0)
 
@@ -2525,10 +1979,6 @@ void handle_get(
             return;
 
         }
-
-
-
-
 
         if (send_all(
 
@@ -2548,27 +1998,15 @@ void handle_get(
 
         }
 
-
-
-
-
         total_sent +=
 
             (unsigned long long)bytes_read;
 
     }
 
-
-
-
-
     fclose(input_file);
 
 }
-
-
-
-
 
 /*
 
@@ -2588,10 +2026,6 @@ void process_get_command(
 
     char filename[256];
 
-
-
-
-
     if (sscanf(
 
             command,
@@ -2606,8 +2040,6 @@ void process_get_command(
 
         char response[BUFFER_SIZE];
 
-
-
         snprintf(
 
             response,
@@ -2620,8 +2052,6 @@ void process_get_command(
 
         );
 
-
-
         send_all(
 
             client_socket,
@@ -2632,15 +2062,9 @@ void process_get_command(
 
         );
 
-
-
         return;
 
     }
-
-
-
-
 
     handle_get(
 
@@ -2651,10 +2075,6 @@ void process_get_command(
     );
 
 }
-
-
-
-
 
 /*
 
@@ -2779,7 +2199,6 @@ void *monitor_thread(void *argument)
     return NULL;
 }
 
-
 /*
  * Start UDP monitoring for one Controller.
  */
@@ -2802,10 +2221,6 @@ int start_monitor(
 
     );
 
-
-
-
-
     if (monitor->running)
 
     {
@@ -2816,15 +2231,9 @@ int start_monitor(
 
         );
 
-
-
         return 1;
 
     }
-
-
-
-
 
     monitor->udp_socket =
 
@@ -2838,10 +2247,6 @@ int start_monitor(
 
         );
 
-
-
-
-
     if (monitor->udp_socket < 0)
 
     {
@@ -2852,23 +2257,13 @@ int start_monitor(
 
         );
 
-
-
         return -1;
 
     }
 
-
-
-
-
     monitor->destination =
 
         *controller_address;
-
-
-
-
 
     monitor->destination.sin_port =
 
@@ -2878,19 +2273,9 @@ int start_monitor(
 
         );
 
-
-
-
-
     monitor->stop_requested = 0;
 
-
-
     monitor->running = 1;
-
-
-
-
 
     int result =
 
@@ -2906,10 +2291,6 @@ int start_monitor(
 
         );
 
-
-
-
-
     if (result != 0)
 
     {
@@ -2920,11 +2301,7 @@ int start_monitor(
 
         );
 
-
-
         monitor->running = 0;
-
-
 
         pthread_mutex_unlock(
 
@@ -2932,15 +2309,9 @@ int start_monitor(
 
         );
 
-
-
         return -1;
 
     }
-
-
-
-
 
     pthread_mutex_unlock(
 
@@ -2948,17 +2319,9 @@ int start_monitor(
 
     );
 
-
-
-
-
     return 0;
 
 }
-
-
-
-
 
 /*
 
@@ -2980,10 +2343,6 @@ void stop_monitor(
 
     );
 
-
-
-
-
     if (!monitor->running)
 
     {
@@ -2994,23 +2353,12 @@ void stop_monitor(
 
         );
 
-
-
         return;
 
     }
 
-
-
-
-
     monitor->stop_requested = 1;
 
-
-
-
-
-    
     /*
      * Wake the monitoring thread immediately so that
      * MONITOR STOP does not wait for the next 2-second interval.
@@ -3023,19 +2371,11 @@ pthread_t thread_id =
 
         monitor->thread_id;
 
-
-
-
-
     pthread_mutex_unlock(
 
         &monitor->mutex
 
     );
-
-
-
-
 
     pthread_join(
 
@@ -3045,25 +2385,13 @@ pthread_t thread_id =
 
     );
 
-
-
-
-
     pthread_mutex_lock(
 
         &monitor->mutex
 
     );
 
-
-
-
-
     monitor->running = 0;
-
-
-
-
 
     pthread_mutex_unlock(
 
@@ -3072,10 +2400,6 @@ pthread_t thread_id =
     );
 
 }
-
-
-
-
 
 /*
 
@@ -3099,35 +2423,17 @@ void *client_thread(void *argument)
 
         (client_context_t *)argument;
 
-
-
     int client_socket =
 
         context->client_socket;
-
-
-
-
 
     struct sockaddr_in client_address =
 
         context->client_address;
 
-
-
-
-
     free(context);
 
-
-
-
-
     monitor_context_t monitor;
-
-
-
-
 
     pthread_mutex_init(
 
@@ -3137,11 +2443,6 @@ void *client_thread(void *argument)
 
     );
 
-
-
-
-
-    
     pthread_cond_init(
         &monitor.condition,
         NULL
@@ -3149,17 +2450,9 @@ void *client_thread(void *argument)
 
 monitor.running = 0;
 
-
-
     monitor.stop_requested = 0;
 
-
-
     monitor.udp_socket = -1;
-
-
-
-
 
     printf(
 
@@ -3167,19 +2460,11 @@ monitor.running = 0;
 
     );
 
-
-
-
-
     write_log(
 
         "Controller connected"
 
     );
-
-
-
-
 
     /*
 
@@ -3189,19 +2474,11 @@ monitor.running = 0;
 
     int authenticated = 0;
 
-
-
-
-
     while (1)
 
     {
 
         char command[BUFFER_SIZE];
-
-
-
-
 
         int result =
 
@@ -3214,10 +2491,6 @@ monitor.running = 0;
                 sizeof(command)
 
             );
-
-
-
-
 
         /*
 
@@ -3235,27 +2508,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "Controller disconnected"
 
             );
 
-
-
-
-
             break;
 
         }
-
-
-
-
 
         /*
 
@@ -3269,27 +2530,15 @@ monitor.running = 0;
 
             perror("recv");
 
-
-
-
-
             write_log(
 
                 "Controller connection error"
 
             );
 
-
-
-
-
             break;
 
         }
-
-
-
-
 
         /*
 
@@ -3309,10 +2558,6 @@ monitor.running = 0;
 
         ] = '\0';
 
-
-
-
-
         printf(
 
             "Received: %s\n",
@@ -3320,10 +2565,6 @@ monitor.running = 0;
             command
 
         );
-
-
-
-
 
         /*
 
@@ -3347,10 +2588,6 @@ monitor.running = 0;
 
                 command + 5;
 
-
-
-
-
             if (strcmp(
 
                     token,
@@ -3363,15 +2600,7 @@ monitor.running = 0;
 
                 authenticated = 1;
 
-
-
-
-
                 char response[BUFFER_SIZE];
-
-
-
-
 
                 snprintf(
 
@@ -3385,10 +2614,6 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 send_all(
 
                     client_socket,
@@ -3398,10 +2623,6 @@ monitor.running = 0;
                     strlen(response)
 
                 );
-
-
-
-
 
                 write_log(
 
@@ -3417,15 +2638,7 @@ monitor.running = 0;
 
                 authenticated = 0;
 
-
-
-
-
                 char response[BUFFER_SIZE];
-
-
-
-
 
                 snprintf(
 
@@ -3439,10 +2652,6 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 send_all(
 
                     client_socket,
@@ -3453,10 +2662,6 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 write_log(
 
                     "AUTH failed"
@@ -3465,17 +2670,9 @@ monitor.running = 0;
 
             }
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3489,10 +2686,6 @@ monitor.running = 0;
 
             char response[BUFFER_SIZE];
 
-
-
-
-
             snprintf(
 
                 response,
@@ -3505,10 +2698,6 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             send_all(
 
                 client_socket,
@@ -3519,27 +2708,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "Rejected unauthenticated command"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3563,27 +2740,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "SYSINFO command"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3607,27 +2772,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "LISTPROC command"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3651,10 +2804,6 @@ monitor.running = 0;
 
                 command + 5;
 
-
-
-
-
             handle_exec(
 
                 client_socket,
@@ -3663,27 +2812,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "EXEC command"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3711,27 +2848,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "PUT command"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3759,27 +2884,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "GET command"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -3801,13 +2914,7 @@ monitor.running = 0;
 
             unsigned int udp_port;
 
-
-
             char extra;
-
-
-
-
 
             /*
 
@@ -3839,10 +2946,6 @@ monitor.running = 0;
 
                 char response[BUFFER_SIZE];
 
-
-
-
-
                 snprintf(
 
                     response,
@@ -3855,10 +2958,6 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 send_all(
 
                     client_socket,
@@ -3869,27 +2968,15 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 write_log(
 
                     "MONITOR START invalid UDP port"
 
                 );
 
-
-
-
-
                 continue;
 
             }
-
-
-
-
 
             int monitor_result =
 
@@ -3903,15 +2990,7 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
             char response[BUFFER_SIZE];
-
-
-
-
 
             if (monitor_result == 0)
 
@@ -3928,10 +3007,6 @@ monitor.running = 0;
                     SID
 
                 );
-
-
-
-
 
                 write_log(
 
@@ -3957,10 +3032,6 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 write_log(
 
                     "MONITOR START while already running"
@@ -3985,10 +3056,6 @@ monitor.running = 0;
 
                 );
 
-
-
-
-
                 write_log(
 
                     "MONITOR START failed"
@@ -3996,10 +3063,6 @@ monitor.running = 0;
                 );
 
             }
-
-
-
-
 
             send_all(
 
@@ -4011,17 +3074,9 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -4045,15 +3100,7 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             char response[BUFFER_SIZE];
-
-
-
-
 
             snprintf(
 
@@ -4067,10 +3114,6 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             send_all(
 
                 client_socket,
@@ -4081,27 +3124,15 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "MONITOR STOP"
 
             );
 
-
-
-
-
             continue;
 
         }
-
-
-
-
 
         /*
 
@@ -4121,10 +3152,6 @@ monitor.running = 0;
 
             char response[BUFFER_SIZE];
 
-
-
-
-
             snprintf(
 
                 response,
@@ -4137,10 +3164,6 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             send_all(
 
                 client_socket,
@@ -4151,19 +3174,11 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "QUIT command"
 
             );
-
-
-
-
 
             stop_monitor(
 
@@ -4171,17 +3186,9 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             break;
 
         }
-
-
-
-
 
         /*
 
@@ -4192,10 +3199,6 @@ monitor.running = 0;
         {
 
             char response[BUFFER_SIZE];
-
-
-
-
 
             snprintf(
 
@@ -4209,10 +3212,6 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             send_all(
 
                 client_socket,
@@ -4223,10 +3222,6 @@ monitor.running = 0;
 
             );
 
-
-
-
-
             write_log(
 
                 "Unknown command"
@@ -4236,10 +3231,6 @@ monitor.running = 0;
         }
 
     }
-
-
-
-
 
     /*
 
@@ -4255,10 +3246,6 @@ monitor.running = 0;
 
     );
 
-
-
-
-
     pthread_cond_destroy(
         &monitor.condition
     );
@@ -4269,27 +3256,15 @@ monitor.running = 0;
 
     );
 
-
-
-
-
     close(
 
         client_socket
 
     );
 
-
-
-
-
     return NULL;
 
 }
-
-
-
-
 
 /*
 
@@ -4303,23 +3278,11 @@ int main(void)
 
     int server_socket;
 
-
-
-
-
     struct sockaddr_in server_address;
 
     struct sockaddr_in client_address;
 
-
-
-
-
     socklen_t client_length;
-
-
-
-
 
     /*
 
@@ -4335,10 +3298,6 @@ int main(void)
 
     );
 
-
-
-
-
     mkdir(
 
         STORAGE_PATH,
@@ -4346,10 +3305,6 @@ int main(void)
         0755
 
     );
-
-
-
-
 
     /*
 
@@ -4369,10 +3324,6 @@ int main(void)
 
         );
 
-
-
-
-
     if (server_socket < 0)
 
     {
@@ -4383,10 +3334,6 @@ int main(void)
 
     }
 
-
-
-
-
     /*
 
      * Allow quick restart.
@@ -4394,10 +3341,6 @@ int main(void)
      */
 
     int option = 1;
-
-
-
-
 
     if (setsockopt(
 
@@ -4417,23 +3360,11 @@ int main(void)
 
         perror("setsockopt");
 
-
-
-
-
         close(server_socket);
-
-
-
-
 
         return 1;
 
     }
-
-
-
-
 
     /*
 
@@ -4451,33 +3382,17 @@ int main(void)
 
     );
 
-
-
-
-
     server_address.sin_family =
 
         AF_INET;
-
-
-
-
 
     server_address.sin_addr.s_addr =
 
         htonl(INADDR_ANY);
 
-
-
-
-
     server_address.sin_port =
 
         htons(PORT);
-
-
-
-
 
     /*
 
@@ -4499,23 +3414,11 @@ int main(void)
 
         perror("bind");
 
-
-
-
-
         close(server_socket);
-
-
-
-
 
         return 1;
 
     }
-
-
-
-
 
     /*
 
@@ -4535,33 +3438,17 @@ int main(void)
 
         perror("listen");
 
-
-
-
-
         close(server_socket);
-
-
-
-
 
         return 1;
 
     }
-
-
-
-
 
     printf(
 
         "RemoteOps Agent started.\n"
 
     );
-
-
-
-
 
     printf(
 
@@ -4571,10 +3458,6 @@ int main(void)
 
     );
 
-
-
-
-
     printf(
 
         "Session ID: %s\n",
@@ -4582,10 +3465,6 @@ int main(void)
         SID
 
     );
-
-
-
-
 
     printf(
 
@@ -4595,19 +3474,11 @@ int main(void)
 
     );
 
-
-
-
-
     write_log(
 
         "Agent started"
 
     );
-
-
-
-
 
     /*
 
@@ -4631,10 +3502,6 @@ int main(void)
 
             sizeof(client_address);
 
-
-
-
-
         int client_socket =
 
             accept(
@@ -4647,10 +3514,6 @@ int main(void)
 
             );
 
-
-
-
-
         if (client_socket < 0)
 
         {
@@ -4661,10 +3524,6 @@ int main(void)
 
         }
 
-
-
-
-
         client_context_t *context =
 
             malloc(
@@ -4673,55 +3532,27 @@ int main(void)
 
             );
 
-
-
-
-
         if (context == NULL)
 
         {
 
             perror("malloc");
 
-
-
-
-
             close(client_socket);
-
-
-
-
 
             continue;
 
         }
 
-
-
-
-
         context->client_socket =
 
             client_socket;
-
-
-
-
 
         context->client_address =
 
             client_address;
 
-
-
-
-
         pthread_t thread_id;
-
-
-
-
 
         int thread_result =
 
@@ -4737,10 +3568,6 @@ int main(void)
 
             );
 
-
-
-
-
         if (thread_result != 0)
 
         {
@@ -4755,29 +3582,13 @@ int main(void)
 
             );
 
-
-
-
-
             close(client_socket);
 
-
-
-
-
             free(context);
-
-
-
-
 
             continue;
 
         }
-
-
-
-
 
         pthread_detach(
 
@@ -4787,19 +3598,11 @@ int main(void)
 
     }
 
-
-
-
-
     close(
 
         server_socket
 
     );
-
-
-
-
 
     return 0;
 
