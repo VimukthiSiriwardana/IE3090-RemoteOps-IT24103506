@@ -303,6 +303,9 @@ The following functionality was tested:
     +-- controller_506.c
     +-- Makefile_506
     +-- README.md
+    +-- DESIGN_DIARY.md
+    +-- AI_PROMPT_LOG.md
+    +-- REFLECTION.md
     +-- .gitignore
 
 Runtime files generated during execution include:
